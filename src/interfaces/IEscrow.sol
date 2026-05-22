@@ -65,7 +65,6 @@ interface IEscrow {
 
     /// @notice Return struct for `getEscrowSummary()`. Not a storage struct.
     struct EscrowSummary {
-        bytes32 escrowId;
         address founder;
         address token;
         uint256 totalAmount;
@@ -76,25 +75,17 @@ interface IEscrow {
         EscrowState escrowState;
         uint16 feeBps;
         uint32 gracePeriod;
-        uint16 quorumBps;
     }
 
     /// @notice Initialization payload for factory-driven clone init.
-    /// @dev Kept as a struct to survive stack-depth limits and to document the full
-    ///      freeze-locked init surface in one place.
     struct InitParams {
-        bytes32 escrowId;
-        address factory; // msg.sender at init time; the only authorized initializer
         address founder;
-        address token; // USDC on Base in v0; factory validates allowlist
         address investor;
+        address token;
+        uint256 totalAmount;
         uint256[] milestoneAmounts; // declared milestone targets (sums equal totalAmount)
         uint64[] milestoneDeadlines; // UNIX timestamps
         bytes32[] milestoneDescriptionHashes;
-        uint16 feeBps; // basis points, e.g. 500 = 5%
-        uint32 gracePeriod; // seconds after deadline before refunds unlock
-        uint16 quorumBps; // basis points threshold, e.g. 5_001 for ">50%"
-        address arbitrator; // dispute arbitrator snapshotted at init
     }
 
     // =====================================================================
@@ -102,22 +93,16 @@ interface IEscrow {
     // =====================================================================
 
     /// @notice Emitted exactly once at clone initialization.
-    event EscrowCreated(
-        bytes32 indexed escrowId,
-        address indexed founder,
-        address indexed token,
-        uint256 totalAmount,
-        uint256 milestones
-    );
+    event EscrowCreated(address indexed founder, address indexed token, uint256 totalAmount, uint256 milestones);
 
     /// @notice Emitted when founder and investor `EscrowAcceptance` signatures activate the escrow.
-    event EscrowActivated(bytes32 indexed escrowId, uint64 activatedAt);
+    event EscrowActivated(uint64 activatedAt);
 
     /// @notice Emitted on investor deposit into a milestone.
     event MilestoneDeposited(uint256 indexed milestoneIndex, address indexed investor, uint256 amount, uint256 feePaid);
 
-    /// @notice Emitted when signature-weighted verification passes for a milestone.
-    event MilestoneVerified(uint256 indexed milestoneIndex, uint256 weight, uint256 threshold, bytes32 evidenceHash);
+    /// @notice Emitted when the investor verifies a milestone.
+    event MilestoneVerified(uint256 indexed milestoneIndex, address indexed investor, bytes32 evidenceHash);
 
     /// @notice Emitted when verified funds are released to the founder, net of fee.
     event MilestoneReleased(
@@ -136,7 +121,7 @@ interface IEscrow {
     event FeeCollected(uint256 indexed milestoneIndex, address indexed treasury, uint256 amount);
 
     /// @notice Emitted when the escrow is cancelled by consent or refund drain.
-    event EscrowCancelled(bytes32 indexed escrowId, uint64 cancelledAt);
+    event EscrowCancelled(uint64 cancelledAt);
 
     /// @notice Emitted when a dispute is opened on a milestone.
     /// @param milestoneIndex Milestone being disputed.
@@ -174,7 +159,13 @@ interface IEscrow {
     /// @notice Initialize the clone with frozen escrow parameters.
     /// @dev Can only be called once, and only by the factory that cloned this contract.
     /// @param params Packed initialization struct; see `InitParams`.
-    function initialize(InitParams calldata params) external;
+    function initialize(
+        InitParams calldata params,
+        address factory,
+        uint16 feeBps,
+        uint32 gracePeriod,
+        address arbitrator
+    ) external;
 
     // =====================================================================
     // Lifecycle - escrow activation (EIP-712)
@@ -196,18 +187,15 @@ interface IEscrow {
     /// @param milestoneIndex Milestone receiving funds. Must equal the current milestone.
     function deposit(uint256 milestoneIndex) external;
 
-    /// @notice Submit investor EIP-712 verification and release the milestone on success.
-    /// @dev Passes only when distinct signer weight reaches the configured quorum threshold.
+    /// @notice Submit investor verification and release the milestone on success.
     /// @param milestoneIndex Milestone being verified.
     /// @param evidenceHash keccak256 of the off-chain evidence bundle.
-    /// @param signers Signers whose verification signatures are submitted.
-    /// @param signatures EIP-712 signatures aligned index-for-index with `signers`.
+    /// @param signature Investor signature authorizing verification.
     /// @param verificationDeadline UNIX timestamp after which the signed payload is invalid.
     function verifyMilestone(
         uint256 milestoneIndex,
         bytes32 evidenceHash,
-        address[] calldata signers,
-        bytes[] calldata signatures,
+        bytes calldata signature,
         uint256 verificationDeadline
     ) external;
 
@@ -237,11 +225,9 @@ interface IEscrow {
     function claimRefund(uint256 milestoneIndex) external;
 
     // =====================================================================
-    // Dispute arbitration - ERC-792 compatible
+    // Dispute arbitration
     // =====================================================================
     //
-    // `rule(uint256,uint256)` is inherited from `IArbitrable` by the concrete escrow and is
-    // not redeclared here. Solidity rejects duplicate declarations for the same function.
 
     /// @notice Open a dispute on a milestone.
     /// @dev Callable by the founder or the depositing investor. Commits evidence and starts
@@ -276,15 +262,6 @@ interface IEscrow {
     /// @param milestoneIndex Milestone index.
     /// @return info The stored `DisputeInfo` struct.
     function getDisputeInfo(uint256 milestoneIndex) external view returns (DisputeInfo memory info);
-
-    /// @notice Return the current EIP-712 nonce for a signer.
-    /// @param signer Address whose nonce is being queried.
-    /// @return nonce The next nonce expected from `signer`.
-    function nonceOf(address signer) external view returns (uint256 nonce);
-
-    /// @notice EIP-712 domain separator bound to this clone and the current chain.
-    /// @return separator The domain separator.
-    function DOMAIN_SEPARATOR() external view returns (bytes32 separator);
 
     /// @notice Factory that deployed this clone.
     /// @return factoryAddress The factory address.
