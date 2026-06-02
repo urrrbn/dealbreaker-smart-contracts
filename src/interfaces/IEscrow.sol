@@ -46,7 +46,8 @@ interface IEscrow {
     struct Milestone {
         uint256 amount; // declared target amount
         uint64 deadline; // verification deadline, as a UNIX timestamp
-        uint8 state; // MilestoneState
+        uint64 graceEndsAt; // absolute timestamp at which grace closes; resumes after a dispute
+        MilestoneState state; // current milestone state
         bytes32 descriptionHash; // keccak256 of off-chain description document
     }
 
@@ -58,7 +59,7 @@ interface IEscrow {
         uint64 openedAt; // block.timestamp at createDispute (zero = no active dispute)
         uint64 endsAt; // openedAt + DISPUTE_WINDOW
         uint64 graceRemaining; // grace seconds snapshotted at createDispute
-        uint8 priorState; // milestone state snapshotted at createDispute
+        MilestoneState priorState; // milestone state snapshotted at createDispute
         address initiator; // msg.sender at createDispute
         bytes32 evidenceHash; // keccak256 of the off-chain evidence bundle
     }
@@ -88,6 +89,15 @@ interface IEscrow {
         bytes32[] milestoneDescriptionHashes;
     }
 
+    /// @notice Terms for a milestone renegotiation.
+    struct RenegotiationTerms {
+        uint256 milestoneIndex;
+        uint64 newDeadline;
+        uint256 newAmount;
+        bytes32 newDescriptionHash;
+        uint256 deadline;
+    }
+
     // =====================================================================
     // Events
     // =====================================================================
@@ -99,7 +109,7 @@ interface IEscrow {
     event EscrowActivated(uint64 activatedAt);
 
     /// @notice Emitted on investor deposit into a milestone.
-    event MilestoneDeposited(uint256 indexed milestoneIndex, address indexed investor, uint256 amount, uint256 feePaid);
+    event MilestoneDeposited(uint256 indexed milestoneIndex, address indexed investor, uint256 amount);
 
     /// @notice Emitted when the investor verifies a milestone.
     event MilestoneVerified(uint256 indexed milestoneIndex, address indexed investor, bytes32 evidenceHash);
@@ -145,7 +155,7 @@ interface IEscrow {
     /// @notice Emitted when a dispute expires without a ruling.
     /// @param milestoneIndex Milestone whose dispute expired.
     /// @param priorState Base milestone state at the time the dispute was opened (restored on expiry).
-    event DisputeExpired(uint256 indexed milestoneIndex, uint8 priorState);
+    event DisputeExpired(uint256 indexed milestoneIndex, MilestoneState priorState);
 
     /// @notice Emitted when grace resumes after dispute resolution.
     /// @param milestoneIndex Milestone whose grace timer has resumed.
@@ -168,14 +178,15 @@ interface IEscrow {
     ) external;
 
     // =====================================================================
-    // Lifecycle - escrow activation (EIP-712)
+    // Lifecycle - escrow activation (EIP-191 personal_sign)
     // =====================================================================
 
     /// @notice Submit founder + investor signatures and activate the escrow.
     /// @dev The order of `signatures` must be [founder, investor]. Each signer nonce is
     ///      consumed atomically. On success, escrow state becomes `Active` and milestone 0
     ///      becomes `Active`.
-    /// @param signatures Ordered 65-byte EIP-712 signatures over `EscrowAcceptance`.
+    /// @param signatures Ordered 65-byte EIP-191 `personal_sign` signatures over the
+    ///                   acceptance payload (escrow, founder, investor, deadline, chainid, nonce).
     /// @param acceptanceDeadline UNIX timestamp after which the signed payload is invalid.
     function activateEscrow(bytes[] calldata signatures, uint256 acceptanceDeadline) external;
 
@@ -208,7 +219,7 @@ interface IEscrow {
     /// @param newAmount New target amount. Existing deposits are reconciled against the new amount.
     /// @param newDescriptionHash keccak256 of the revised milestone document.
     /// @param signers Founder followed by the depositing investor for this milestone.
-    /// @param signatures EIP-712 signatures aligned with `signers`.
+    /// @param signatures EIP-191 `personal_sign` signatures aligned with `signers`.
     /// @param renegDeadline UNIX timestamp after which the signed payload is invalid.
     function renegotiateMilestone(
         uint256 milestoneIndex,
@@ -237,6 +248,12 @@ interface IEscrow {
     ///                       deadline, and still inside grace.
     /// @param evidenceHash keccak256 of the off-chain evidence bundle. Must be non-zero.
     function createDispute(uint256 milestoneIndex, bytes32 evidenceHash) external;
+
+    /// @notice Arbitrator resolves an active dispute by ruling for founder (force-release) or investor (refundable).
+    /// @dev Only callable by the per-clone arbitrator while the dispute window is still open.
+    /// @param milestoneIndex Milestone whose dispute is being resolved.
+    /// @param releaseToFounder If true, force-release funds to founder; if false, make milestone refundable.
+    function resolveDisputeByArbitrator(uint256 milestoneIndex, bool releaseToFounder) external;
 
     /// @notice Close an expired dispute with no ruling.
     /// @dev Permissionless after `DISPUTE_WINDOW`. Moves the milestone to `Refundable` and

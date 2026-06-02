@@ -28,11 +28,9 @@ library Errors {
     error OnlyInvestor();
     error NotCurrentMilestone();
     error NotDepositable();
-    error SignatureMismatch();
     error EmptyEvidence();
     error NotFunded();
     error GraceExpired();
-    error QuorumNotMet();
     error BadDeadline();
     error BadAmount();
     error BadDescription();
@@ -47,6 +45,5 @@ library Errors {
     error NoDispute();
     error BadMilestone();
     error BadSignature();
-    error SignerHasNoWeight();
-    error DuplicateSigner();
+    error OnlyArbitrator();
 }

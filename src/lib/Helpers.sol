@@ -30,9 +30,9 @@ library Helpers {
     }
 
     /// @dev Returns whether a milestone state can be renegotiated.
-    function isRenegotiable(uint8 state) internal pure returns (bool) {
-        return state == uint8(IEscrow.MilestoneState.Active) || state == uint8(IEscrow.MilestoneState.Funded)
-            || state == uint8(IEscrow.MilestoneState.Refundable);
+    function isRenegotiable(IEscrow.MilestoneState state) internal pure returns (bool) {
+        return state == IEscrow.MilestoneState.Active || state == IEscrow.MilestoneState.Funded
+            || state == IEscrow.MilestoneState.Refundable;
     }
 
     /// @dev Internal function to validate milestone initialization parameters.

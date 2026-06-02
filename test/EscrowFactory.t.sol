@@ -35,7 +35,7 @@ contract EscrowFactoryTest is Test {
         assertEq(escrow.founder(), founder);
         assertEq(escrow.investor(), investor);
         assertEq(escrow.token(), token);
-        assertEq(escrow.totalAmount(), 100 ether);
+        assertEq(escrow.getEscrowSummary().totalAmount, 100 ether);
         assertEq(escrow.feeBps(), 250);
         assertEq(escrow.gracePeriod(), 3 days);
         assertEq(escrow.arbitrator(), arbitrator);

@@ -14,15 +14,6 @@ import {VerifySignature} from "./lib/VerifySignature.sol";
 contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    struct RenegotiationTerms {
-        uint256 milestoneIndex;
-        uint64 newDeadline;
-        uint256 newAmount;
-        bytes32 newDescriptionHash;
-        uint256 deadline;
-    }
-
-    uint256 private constant SECP256K1_HALF_ORDER = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
     uint64 public constant DISPUTE_WINDOW = 7 days;
 
     address public override factory;
@@ -84,7 +75,8 @@ contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
                 Milestone({
                     amount: params.milestoneAmounts[i],
                     deadline: params.milestoneDeadlines[i],
-                    state: uint8(MilestoneState.Pending),
+                    graceEndsAt: params.milestoneDeadlines[i] + gracePeriod_,
+                    state: MilestoneState.Pending,
                     descriptionHash: params.milestoneDescriptionHashes[i]
                 })
             );
@@ -93,9 +85,8 @@ contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
         emit EscrowCreated(params.founder, params.token, params.totalAmount, params.milestoneAmounts.length);
     }
 
-    // okay
     function activateEscrow(
-        bytes[] calldata signatures, 
+        bytes[] calldata signatures,
         uint256 deadline
     ) external override onlyInitialized {
         if (escrowState != EscrowState.AwaitingAcceptance) revert Errors.BadEscrowState();
@@ -106,12 +97,11 @@ contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
         _verifyAcceptance(investor, signatures[1], deadline);
 
         escrowState = EscrowState.Active;
-        _milestones[0].state = uint8(MilestoneState.Active);
+        _milestones[0].state = MilestoneState.Active;
 
         emit EscrowActivated(uint64(block.timestamp));
     }
 
-    // okay
     function deposit(uint256 milestoneIndex)
         external
         override
@@ -123,45 +113,43 @@ contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
         if (milestoneIndex != currentMilestoneIndex) revert Errors.NotCurrentMilestone();
 
         Milestone storage milestone = _milestones[milestoneIndex];
-        if (milestone.state != uint8(MilestoneState.Active)) revert Errors.NotDepositable();
+        if (milestone.state != MilestoneState.Active) revert Errors.NotDepositable();
 
         uint256 amount = milestone.amount;
-        milestone.state = uint8(MilestoneState.Funded);
+        milestone.state = MilestoneState.Funded;
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
 
         emit MilestoneDeposited(milestoneIndex, msg.sender, amount);
     }
-    
-    // okay
+
     function verifyMilestone(
         uint256 milestoneIndex,
+        bytes32 evidenceHash,
         bytes calldata signature,
         uint256 deadline
-    ) 
-        external 
-        override 
-        onlyInitialized 
-        onlyActiveEscrow 
-        noActiveDispute(milestoneIndex) 
-        nonReentrant 
+    )
+        external
+        override
+        onlyInitialized
+        onlyActiveEscrow
+        noActiveDispute(milestoneIndex)
+        nonReentrant
     {
         if (milestoneIndex != currentMilestoneIndex) revert Errors.NotCurrentMilestone();
         if (block.timestamp > deadline) revert Errors.SignatureExpired();
 
         Milestone storage milestone = _milestones[milestoneIndex];
-        if (milestone.state != uint8(MilestoneState.Funded)) revert Errors.NotFunded();
-        if (block.timestamp > milestone.deadline + gracePeriod) revert Errors.GraceExpired();
+        if (milestone.state != MilestoneState.Funded) revert Errors.NotFunded();
+        if (block.timestamp > milestone.graceEndsAt) revert Errors.GraceExpired();
 
         _verifyMilestoneSignature(milestoneIndex, signature, deadline);
 
-        milestone.state = uint8(MilestoneState.Verified);
-        emit MilestoneVerified(milestoneIndex, investor);
+        milestone.state = MilestoneState.Verified;
+        emit MilestoneVerified(milestoneIndex, investor, evidenceHash);
 
         _releaseMilestone(milestoneIndex);
     }
-
-
 
     function renegotiateMilestone(
         uint256 milestoneIndex,
@@ -171,12 +159,12 @@ contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
         address[] calldata signers,
         bytes[] calldata signatures,
         uint256 deadline
-    ) 
-        external 
-        override 
-        onlyInitialized 
-        onlyActiveEscrow 
-        noActiveDispute(milestoneIndex) 
+    )
+        external
+        override
+        onlyInitialized
+        onlyActiveEscrow
+        noActiveDispute(milestoneIndex)
         nonReentrant
     {
         if (milestoneIndex != currentMilestoneIndex) revert Errors.NotCurrentMilestone();
@@ -189,24 +177,42 @@ contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
 
         Milestone storage milestone = _milestones[milestoneIndex];
         if (!Helpers.isRenegotiable(milestone.state)) revert Errors.NotRenegotiable();
-        if (block.timestamp > _graceEnds(milestoneIndex, milestone)) revert Errors.GraceExpired();
+        if (block.timestamp > milestone.graceEndsAt) revert Errors.GraceExpired();
 
         RenegotiationTerms memory terms = RenegotiationTerms({
             milestoneIndex: milestoneIndex,
             newDeadline: newDeadline,
             newAmount: newAmount,
-            newDescriptionHash: newDescriptionHash
+            newDescriptionHash: newDescriptionHash,
+            deadline: deadline
         });
 
         _verifyRenegotiation(founder, signatures[0], terms);
         _verifyRenegotiation(investor, signatures[1], terms);
 
+        // Funded and Refundable both imply the contract is holding a live deposit of `oldAmount`;
+        // Active does not.
+        bool hasDeposit = milestone.state == MilestoneState.Funded || milestone.state == MilestoneState.Refundable;
         uint256 oldAmount = milestone.amount;
+
         milestone.amount = newAmount;
         milestone.deadline = newDeadline;
+        // Fresh deadline resets grace from scratch, discarding any dispute-resumed window.
+        milestone.graceEndsAt = newDeadline + gracePeriod;
         milestone.descriptionHash = newDescriptionHash;
-        milestone.state =
-            oldAmount >= newAmount ? uint8(MilestoneState.Funded) : uint8(MilestoneState.Active);
+
+        if (!hasDeposit) {
+            // Nothing deposited yet: the new terms must be funded from scratch.
+            milestone.state = MilestoneState.Active;
+        } else if (newAmount <= oldAmount) {
+            // Existing deposit still covers the (smaller-or-equal) target; refund the freed excess.
+            milestone.state = MilestoneState.Funded;
+            if (oldAmount > newAmount) IERC20(token).safeTransfer(investor, oldAmount - newAmount);
+        } else {
+            // Existing deposit no longer covers the larger target; return it and require a fresh deposit.
+            milestone.state = MilestoneState.Active;
+            IERC20(token).safeTransfer(investor, oldAmount);
+        }
 
         emit MilestoneRenegotiated(milestoneIndex, newDeadline, newAmount, newDescriptionHash);
     }
@@ -223,19 +229,18 @@ contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
         if (milestoneIndex != currentMilestoneIndex) revert Errors.NotCurrentMilestone();
 
         Milestone storage milestone = _milestones[milestoneIndex];
-        if (milestone.state != uint8(MilestoneState.Funded) && milestone.state != uint8(MilestoneState.Refundable)) {
+        if (milestone.state != MilestoneState.Funded && milestone.state != MilestoneState.Refundable) {
             revert Errors.NotRefundable();
         }
-        if (block.timestamp <= _graceEnds(milestoneIndex)) revert Errors.GraceActive();
+        if (block.timestamp <= milestone.graceEndsAt) revert Errors.GraceActive();
 
-        milestone.state = uint8(MilestoneState.Refundable);
         uint256 refundAmount = milestone.amount;
-        milestone.state = uint8(MilestoneState.Refunded);
+        milestone.state = MilestoneState.Refunded;
 
         IERC20(token).safeTransfer(investor, refundAmount);
 
         emit MilestoneRefunded(milestoneIndex, investor, refundAmount);
-        _advanceAfterRefund();
+        _advance(EscrowState.Cancelled);
     }
 
     function createDispute(uint256 milestoneIndex, bytes32 evidenceHash)
@@ -243,17 +248,17 @@ contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
         override
         onlyInitialized
         onlyActiveEscrow
+        noActiveDispute(milestoneIndex)
     {
         if (msg.sender != founder && msg.sender != investor) revert Errors.Unauthorized();
         if (evidenceHash == bytes32(0)) revert Errors.EmptyEvidence();
         if (milestoneIndex != currentMilestoneIndex) revert Errors.NotCurrentMilestone();
-        if (_disputes[milestoneIndex].openedAt != 0) revert Errors.DisputeActive();
 
         Milestone storage milestone = _milestones[milestoneIndex];
-        if (milestone.state != uint8(MilestoneState.Active) && milestone.state != uint8(MilestoneState.Funded)) {
+        if (milestone.state != MilestoneState.Active && milestone.state != MilestoneState.Funded) {
             revert Errors.BadMilestoneState();
         }
-        uint64 graceEndsAt = _graceEnds(milestoneIndex);
+        uint64 graceEndsAt = milestone.graceEndsAt;
         if (block.timestamp <= milestone.deadline || block.timestamp > graceEndsAt) {
             revert Errors.OutsideDisputeWindow();
         }
@@ -272,6 +277,37 @@ contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
         emit DisputeCreated(milestoneIndex, msg.sender, evidenceHash, endsAt);
     }
 
+    function resolveDisputeByArbitrator(uint256 milestoneIndex, bool releaseToFounder)
+        external
+        override
+        onlyInitialized
+        nonReentrant
+    {
+        if (msg.sender != arbitrator) revert Errors.OnlyArbitrator();
+
+        DisputeInfo memory dispute = _disputes[milestoneIndex];
+        if (dispute.openedAt == 0) revert Errors.NoDispute();
+        if (block.timestamp > dispute.endsAt) revert Errors.GraceExpired();
+
+        delete _disputes[milestoneIndex];
+
+        Milestone storage milestone = _milestones[milestoneIndex];
+
+        if (releaseToFounder) {
+            if (dispute.priorState != MilestoneState.Funded) revert Errors.NotFunded();
+
+            (uint256 founderAmount, uint256 feeAmount) = _settleRelease(milestoneIndex);
+
+            emit MilestoneForceReleased(milestoneIndex, arbitrator, founderAmount, feeAmount);
+            _advance(EscrowState.Finalized);
+        } else {
+            milestone.state = MilestoneState.Refundable;
+            uint64 newGraceEndsAt = uint64(block.timestamp) + dispute.graceRemaining;
+            milestone.graceEndsAt = newGraceEndsAt;
+            emit DisputeGraceResumed(milestoneIndex, newGraceEndsAt);
+        }
+    }
+
     function resolveExpiredDispute(uint256 milestoneIndex) external override onlyInitialized {
         DisputeInfo memory dispute = _disputes[milestoneIndex];
         if (dispute.openedAt == 0) revert Errors.NoDispute();
@@ -280,128 +316,128 @@ contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
         delete _disputes[milestoneIndex];
 
         Milestone storage milestone = _milestones[milestoneIndex];
-        milestone.state = uint8(MilestoneState.Refundable);
+        milestone.state = MilestoneState.Refundable;
+
+        uint64 newGraceEndsAt = uint64(block.timestamp) + dispute.graceRemaining;
+        milestone.graceEndsAt = newGraceEndsAt;
 
         emit DisputeExpired(milestoneIndex, dispute.priorState);
+        emit DisputeGraceResumed(milestoneIndex, newGraceEndsAt);
     }
-    
 
-    //okay
+    function getEscrowSummary() external view override returns (EscrowSummary memory summary) {
+        uint256 totalAmount;
+        uint256 totalReleased;
+        uint256 totalAccounted;
+
+        for (uint256 i = 0; i < _milestones.length; i++) {
+            totalAmount += _milestones[i].amount;
+            if (_milestones[i].state == MilestoneState.Released) {
+                totalReleased += _milestones[i].amount;
+                totalAccounted += _milestones[i].amount;
+            } else if (_milestones[i].state == MilestoneState.Refunded) {
+                totalAccounted += _milestones[i].amount;
+            }
+        }
+
+        summary = EscrowSummary({
+            founder: founder,
+            token: token,
+            totalAmount: totalAmount,
+            totalReleased: totalReleased,
+            totalAccounted: totalAccounted,
+            milestoneCount: _milestones.length,
+            currentMilestoneIndex: currentMilestoneIndex,
+            escrowState: escrowState,
+            feeBps: feeBps,
+            gracePeriod: gracePeriod
+        });
+    }
+
     function getMilestone(uint256 milestoneIndex) external view override returns (Milestone memory milestone) {
         if (milestoneIndex >= _milestones.length) revert Errors.BadMilestone();
         return _milestones[milestoneIndex];
     }
-    
 
-    // okay
     function getDisputeInfo(uint256 milestoneIndex) external view override returns (DisputeInfo memory info) {
         if (milestoneIndex >= _milestones.length) revert Errors.BadMilestone();
         return _disputes[milestoneIndex];
     }
-    
-    // okay
+
     function _releaseMilestone(uint256 milestoneIndex) private {
+        (uint256 founderAmount, uint256 feeAmount) = _settleRelease(milestoneIndex);
+
+        emit MilestoneReleased(milestoneIndex, founder, founderAmount, feeAmount);
+        _advance(EscrowState.Finalized);
+    }
+
+    /// @dev Marks the milestone Released and pays the founder net of fee, forwarding the fee to the
+    ///      factory. Shared by the verification (`verifyMilestone`) and arbitrator force-release paths.
+    function _settleRelease(uint256 milestoneIndex) private returns (uint256 founderAmount, uint256 feeAmount) {
         Milestone storage milestone = _milestones[milestoneIndex];
         uint256 amount = milestone.amount;
 
-        uint256 feeAmount = Helpers.calculateFee(amount, feeBps);
-        uint256 founderAmount = amount - feeAmount;
+        feeAmount = Helpers.calculateFee(amount, feeBps);
+        founderAmount = amount - feeAmount;
 
-        milestone.state = uint8(MilestoneState.Released);
+        milestone.state = MilestoneState.Released;
 
         if (founderAmount > 0) IERC20(token).safeTransfer(founder, founderAmount);
         if (feeAmount > 0) {
             IERC20(token).safeTransfer(factory, feeAmount);
             emit FeeCollected(milestoneIndex, factory, feeAmount);
         }
-
-        emit MilestoneReleased(milestoneIndex, founder, founderAmount, feeAmount);
-        _advanceAfterRelease();
     }
-    
-    // okay
-    function _advanceAfterRelease() private {
+
+    /// @dev Advances to the next milestone, or terminates the escrow in `terminalState` when none
+    ///      remain — Finalized after a release, Cancelled (with event) after a refund drain.
+    function _advance(EscrowState terminalState) private {
         if (currentMilestoneIndex + 1 == _milestones.length) {
-            escrowState = EscrowState.Finalized;
+            escrowState = terminalState;
+            if (terminalState == EscrowState.Cancelled) emit EscrowCancelled(uint64(block.timestamp));
         } else {
             currentMilestoneIndex++;
-            _milestones[currentMilestoneIndex].state = uint8(MilestoneState.Active);
+            _milestones[currentMilestoneIndex].state = MilestoneState.Active;
         }
     }
 
-    function _advanceAfterRefund() private {
-        if (currentMilestoneIndex + 1 == _milestones.length) {
-            escrowState = EscrowState.Cancelled;
-            emit EscrowCancelled(uint64(block.timestamp));
-        } else {
-            currentMilestoneIndex++;
-            _milestones[currentMilestoneIndex].state = uint8(MilestoneState.Active);
-        }
-    }
-    
-    // okay
-    function _verifyAcceptance(address signer, bytes calldata signature, uint256 amount, uint256 deadline) private {
-        string memory dataString = bytesToString(
-            abi.encode(address(this), founder, investor, amount, deadline, block.chainid, nonces[signer])
+    function _verifyAcceptance(address signer, bytes calldata signature, uint256 deadline) private {
+        _consumeSignature(
+            signer, signature, abi.encode(address(this), founder, investor, deadline, block.chainid, nonces[signer])
         );
-
-        if (_recoverValidSignature(getSignedHash(dataString), signature) != signer) revert Errors.BadSignature();
-
-        nonces[signer]++;
     }
-    
-    // okay
-    function _verifyMilestoneSignature(
-        uint256 milestoneIndex,
-        bytes calldata signature,
-        uint256 deadline
-    ) private {
-        string memory dataString = bytesToString(
+
+    function _verifyMilestoneSignature(uint256 milestoneIndex, bytes calldata signature, uint256 deadline) private {
+        _consumeSignature(
+            investor,
+            signature,
             abi.encode(address(this), milestoneIndex, investor, deadline, block.chainid, nonces[investor])
         );
-
-        if (_recoverValidSignature(getSignedHash(dataString), signature) != investor) revert Errors.BadSignature();
-
-        nonces[investor]++;
     }
-    
-    //okay
+
     function _verifyRenegotiation(address signer, bytes calldata signature, RenegotiationTerms memory terms) private {
-        string memory dataString = bytesToString(
-            abi.encode(
-                address(this),
-                terms.milestoneIndex,
-                terms.newDeadline,
-                terms.newAmount,
-                terms.newDescriptionHash,
-                signer,
-                terms.deadline,
-                block.chainid,
-                nonces[signer]
-            )
+        bytes memory encoded = abi.encode(
+            address(this),
+            terms.milestoneIndex,
+            terms.newDeadline,
+            terms.newAmount,
+            terms.newDescriptionHash,
+            signer,
+            terms.deadline,
+            block.chainid,
+            nonces[signer]
         );
 
-        if (_recoverValidSignature(getSignedHash(dataString), signature) != signer) revert Errors.BadSignature();
+        _consumeSignature(signer, signature, encoded);
+    }
+
+    /// @dev Recovers the EIP-191 `personal_sign` signature over `encoded`, requires it to match
+    ///      `signer`, and consumes that signer's nonce.
+    function _consumeSignature(address signer, bytes calldata signature, bytes memory encoded) private {
+        if (_recoverValidSignature(getSignedHash(bytesToString(encoded)), signature) != signer) {
+            revert Errors.BadSignature();
+        }
 
         nonces[signer]++;
-    }
-    
-    //okay
-    function _recoverValidSignature(bytes32 signedHash, bytes calldata signature)
-        private
-        pure
-        returns (address signer)
-    {
-        if (signature.length != 65) revert Errors.BadSignatures();
-
-        (bytes32 r, bytes32 s, uint8 v) = splitSignature(signature);
-        if ((v != 27 && v != 28) || uint256(s) > SECP256K1_HALF_ORDER) revert Errors.BadSignature();
-
-        signer = ecrecover(signedHash, v, r, s);
-        if (signer == address(0)) revert Errors.BadSignature();
-    }
-
-    function _graceEnds(uint256 milestoneIndex) private view returns (uint64) {
-        return _milestones[milestoneIndex].deadline + uint64(gracePeriod);
     }
 }

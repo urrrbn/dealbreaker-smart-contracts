@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: UNLICENSED
 
 import "./StringConversions.sol";
+import {Errors} from "./Errors.sol";
 
 pragma solidity ^0.8.0;
 
 contract VerifySignature is StringConversions {
+    uint256 private constant SECP256K1_HALF_ORDER = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
+
     // use this function to get the hash of any string
     function getHash(string memory str) public pure returns (bytes32) {
         return keccak256(abi.encodePacked(str));
@@ -38,5 +41,21 @@ contract VerifySignature is StringConversions {
         }
 
         return (r, s, v);
+    }
+
+    /// @dev Recovers the signer from a 65-byte signature, rejecting malformed `v` and the
+    ///      malleable upper half of `s` (EIP-2). Reverts if recovery yields the zero address.
+    function _recoverValidSignature(bytes32 signedHash, bytes calldata signature)
+        internal
+        pure
+        returns (address signer)
+    {
+        if (signature.length != 65) revert Errors.BadSignatures();
+
+        (bytes32 r, bytes32 s, uint8 v) = splitSignature(signature);
+        if ((v != 27 && v != 28) || uint256(s) > SECP256K1_HALF_ORDER) revert Errors.BadSignature();
+
+        signer = ecrecover(signedHash, v, r, s);
+        if (signer == address(0)) revert Errors.BadSignature();
     }
 }
