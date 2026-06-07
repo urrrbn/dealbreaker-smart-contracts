@@ -12,7 +12,6 @@ interface IEscrowFactory {
     event AllowedTokenSet(address indexed token, bool allowed);
     event EscrowDeployed(address indexed escrow);
 
-
     function initialize(
         uint16 defaultFeeRate_,
         uint32 defaultGracePeriod_,

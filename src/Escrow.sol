@@ -85,10 +85,7 @@ contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
         emit EscrowCreated(params.founder, params.token, params.totalAmount, params.milestoneAmounts.length);
     }
 
-    function activateEscrow(
-        bytes[] calldata signatures,
-        uint256 deadline
-    ) external override onlyInitialized {
+    function activateEscrow(bytes[] calldata signatures, uint256 deadline) external override onlyInitialized {
         if (escrowState != EscrowState.AwaitingAcceptance) revert Errors.BadEscrowState();
         if (block.timestamp > deadline) revert Errors.SignatureExpired();
         if (signatures.length != 2) revert Errors.BadSignatures();
@@ -123,12 +120,7 @@ contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
         emit MilestoneDeposited(milestoneIndex, msg.sender, amount);
     }
 
-    function verifyMilestone(
-        uint256 milestoneIndex,
-        bytes32 evidenceHash,
-        bytes calldata signature,
-        uint256 deadline
-    )
+    function verifyMilestone(uint256 milestoneIndex, bytes32 evidenceHash, bytes calldata signature, uint256 deadline)
         external
         override
         onlyInitialized
@@ -159,14 +151,7 @@ contract Escrow is IEscrow, Initializable, VerifySignature, ReentrancyGuard {
         address[] calldata signers,
         bytes[] calldata signatures,
         uint256 deadline
-    )
-        external
-        override
-        onlyInitialized
-        onlyActiveEscrow
-        noActiveDispute(milestoneIndex)
-        nonReentrant
-    {
+    ) external override onlyInitialized onlyActiveEscrow noActiveDispute(milestoneIndex) nonReentrant {
         if (milestoneIndex != currentMilestoneIndex) revert Errors.NotCurrentMilestone();
         if (block.timestamp > deadline) revert Errors.SignatureExpired();
         if (newDeadline <= block.timestamp) revert Errors.BadDeadline();
