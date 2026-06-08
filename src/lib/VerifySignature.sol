@@ -3,7 +3,7 @@
 import "./StringConversions.sol";
 import {Errors} from "./Errors.sol";
 
-pragma solidity ^0.8.0;
+pragma solidity 0.8.35;
 
 contract VerifySignature is StringConversions {
     uint256 private constant SECP256K1_HALF_ORDER = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;

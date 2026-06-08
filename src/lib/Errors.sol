@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.35;
 
 library Errors {
     /// @notice Error thrown when a zero address is provided where it is not allowed.

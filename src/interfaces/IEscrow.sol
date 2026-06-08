@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity 0.8.35;
 
 interface IEscrow {
     // =====================================================================
@@ -244,8 +244,8 @@ interface IEscrow {
     /// @dev Callable by the founder or the depositing investor. Commits evidence and starts
     ///      `DISPUTE_WINDOW`. While active, the dispute blocks verification, release, refund,
     ///      renegotiation, and cancellation for this milestone.
-    /// @param milestoneIndex Milestone being disputed. Must be active or funded, past its
-    ///                       deadline, and still inside grace.
+    /// @param milestoneIndex Milestone being disputed. Must be funded, past its deadline, and
+    ///                       still inside grace.
     /// @param evidenceHash keccak256 of the off-chain evidence bundle. Must be non-zero.
     function createDispute(uint256 milestoneIndex, bytes32 evidenceHash) external;
 

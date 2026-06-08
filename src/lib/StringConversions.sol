@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.0;
+pragma solidity 0.8.35;
 
 contract StringConversions {
     function uint2str(uint256 _i) internal pure returns (string memory _uintAsString) {
